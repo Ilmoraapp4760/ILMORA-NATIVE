@@ -1,0 +1,482 @@
+name: Build ILMORA Native APK
+
+on:
+  push:
+    paths: ['.github/workflows/build-apk.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+          cache-disabled: true
+          gradle-version-check: false
+
+      - name: Write project files
+        run: |
+          mkdir -p app/src/main/java/com/ilmora/app app/src/main/res/layout app/src/main/res/drawable
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = 'ILMORA'
+          include ':app'
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2'
+          }
+          android {
+              namespace 'com.ilmora.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.ilmora.app'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              signingConfigs {
+                  release {
+                      storeFile file('ilmora.keystore')
+                      storePassword 'ilmora2026'
+                      storeType 'PKCS12'
+                      keyAlias 'ilmora'
+                      keyPassword 'ilmora2026'
+                  }
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <application
+                  android:label="ILMORA"
+                  android:icon="@drawable/ic_app"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".AdhanService" android:exported="false"
+                      android:foregroundServiceType="mediaPlayback"/>
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/res/drawable/ic_app.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#0C4A3C" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#E7D3A4" android:pathData="M54,20c-13,11 -22,20 -22,30h44c0,-10 -9,-19 -22,-30z"/>
+              <path android:fillColor="#C9A24F" android:pathData="M28,54h52v34h-52z"/>
+              <path android:fillColor="#0C4A3C" android:pathData="M49,64h10v24h-10z"/>
+              <path android:fillColor="#0C4A3C" android:pathData="M36,60h8v28h-8z"/>
+              <path android:fillColor="#0C4A3C" android:pathData="M64,60h8v28h-8z"/>
+          </vector>
+          EOF
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <WebView xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/web" android:layout_width="match_parent" android:layout_height="match_parent"/>
+          EOF
+          cat > app/src/main/java/com/ilmora/app/AdhanService.java <<'EOF'
+          package com.ilmora.app;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.media.AudioManager;
+          import android.media.MediaPlayer;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.PowerManager;
+
+          import org.json.JSONObject;
+
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.util.Calendar;
+          import java.util.Locale;
+
+          public class AdhanService extends Service {
+              public static volatile String timingsJson = null;
+              private static final String ADHAN = "https://cdn.aladhan.com/audio/adhans/a9.mp3";
+              private final Handler h = new Handler();
+              private MediaPlayer mp;
+              private JSONObject timings;
+              private String fired = "";
+              private SharedPreferences prefs;
+
+              private final Runnable loop = new Runnable() { public void run() { tick(); h.postDelayed(this, 30000); } };
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  prefs = getSharedPreferences("ilmora_native", MODE_PRIVATE);
+                  goForeground("Adhan alerts are active");
+                  h.postDelayed(loop, 4000);
+              }
+
+              @Override
+              public int onStartCommand(Intent i, int f, int id) { return START_STICKY; }
+
+              @Override
+              public IBinder onBind(Intent i) { return null; }
+
+              @Override
+              public void onDestroy() { h.removeCallbacks(loop); stopAdhan(); super.onDestroy(); }
+
+              private void goForeground(String txt) {
+                  String ch = "keepalive";
+                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                  Notification.Builder b;
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel c = new NotificationChannel(ch, "Adhan Alerts", NotificationManager.IMPORTANCE_LOW);
+                      nm.createNotificationChannel(c);
+                      b = new Notification.Builder(this, ch);
+                  } else {
+                      b = new Notification.Builder(this);
+                  }
+                  b.setContentTitle("ILMORA").setContentText(txt)
+                   .setSmallIcon(android.R.drawable.ic_lock_idle_alarm).setOngoing(true);
+                  startForeground(1, b.build());
+              }
+
+              private void announce(String prayer) {
+                  try {
+                      String ch = "adhan";
+                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                      Notification.Builder b;
+                      if (Build.VERSION.SDK_INT >= 26) {
+                          NotificationChannel c = new NotificationChannel(ch, "Prayer Announcements", NotificationManager.IMPORTANCE_HIGH);
+                          nm.createNotificationChannel(c);
+                          b = new Notification.Builder(this, ch);
+                      } else {
+                          b = new Notification.Builder(this);
+                      }
+                      Intent open = new Intent(this, MainActivity.class);
+                      PendingIntent pi = PendingIntent.getActivity(this, 0, open,
+                          Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+                      b.setContentTitle("It is time for " + prayer).setContentText("Adhan is playing")
+                       .setSmallIcon(android.R.drawable.ic_lock_idle_alarm).setAutoCancel(true).setContentIntent(pi);
+                      nm.notify(2, b.build());
+                  } catch (Exception e) {}
+              }
+
+              private void tick() {
+                  try {
+                      if (timingsJson != null) { try { timings = new JSONObject(timingsJson); } catch (Exception e) {} }
+                      if (timings == null) { fetchTimings(); return; }
+                      if (!prefs.getBoolean("adhanOn", true)) return;
+                      Calendar cal = Calendar.getInstance();
+                      String now = String.format(Locale.US, "%02d:%02d", cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE));
+                      String[] order = {"Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"};
+                      for (String prayer : order) {
+                          String t = timings.optString(prayer, "");
+                          if (t.length() >= 5 && t.startsWith(now) && !fired.equals(prayer + now)) {
+                              fired = prayer + now;
+                              playAdhan();
+                              announce(prayer);
+                              break;
+                          }
+                      }
+                  } catch (Exception e) {}
+              }
+
+              private void playAdhan() {
+                  stopAdhan();
+                  try {
+                      mp = new MediaPlayer();
+                      mp.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
+                      mp.setAudioStreamType(AudioManager.STREAM_MUSIC);
+                      mp.setDataSource(ADHAN);
+                      mp.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                          public void onPrepared(MediaPlayer p) { p.start(); }
+                      });
+                      mp.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                          public void onCompletion(MediaPlayer p) { stopAdhan(); }
+                      });
+                      mp.prepareAsync();
+                  } catch (Exception e) {}
+              }
+
+              private void stopAdhan() {
+                  try { if (mp != null) { mp.stop(); mp.release(); } } catch (Exception e) {}
+                  mp = null;
+              }
+
+              private void fetchTimings() {
+                  new Thread(new Runnable() {
+                      public void run() {
+                          try {
+                              HttpURLConnection c = (HttpURLConnection) new URL("https://api.aladhan.com/v1/timings?method=1").openConnection();
+                              c.setConnectTimeout(8000); c.setReadTimeout(8000);
+                              BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+                              StringBuilder sb = new StringBuilder();
+                              String line;
+                              while ((line = r.readLine()) != null) sb.append(line);
+                              r.close();
+                              JSONObject j = new JSONObject(sb.toString());
+                              timings = j.getJSONObject("data").getJSONObject("timings");
+                          } catch (Exception e) {}
+                      }
+                  }).start();
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/ilmora/app/BootReceiver.java <<'EOF'
+          package com.ilmora.app;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.os.Build;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context ctx, Intent i) {
+                  if (Intent.ACTION_BOOT_COMPLETED.equals(i.getAction())) {
+                      Intent svc = new Intent(ctx, AdhanService.class);
+                      if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(svc); else ctx.startService(svc);
+                  }
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/ilmora/app/MainActivity.java <<'EOF'
+          package com.ilmora.app;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.DownloadManager;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.media.MediaScannerConnection;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.os.Handler;
+          import android.util.Base64;
+          import android.view.View;
+          import android.webkit.CookieManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.URLUtil;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Toast;
+
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.OutputStream;
+
+          public class MainActivity extends Activity {
+              private static final String LIVE = "https://ilmoraapp4760.github.io/ILMORA-APP/";
+              private WebView wv;
+              private long lastBack = 0;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
+                  }
+                  Intent svc = new Intent(this, AdhanService.class);
+                  if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc); else startService(svc);
+                  wv = new WebView(this);
+                  wv.setId(R.id.web);
+                  WebSettings s = wv.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setSupportZoom(false);
+                  CookieManager.getInstance().setAcceptCookie(true);
+                  wv.setWebChromeClient(new WebChromeClient());
+                  wv.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onPageFinished(View v, String url) {
+                          wv.loadUrl("javascript:(function(){if(window.__ilmDl)return;window.__ilmDl=1;"
+                              + "document.addEventListener('click',function(e){"
+                              + "var a=e.target&&e.target.closest?e.target.closest('a[download]'):null;if(!a)return;"
+                              + "var h=a.getAttribute('href')||'';if(h.indexOf('blob:')===0){e.preventDefault();e.stopPropagation();"
+                              + "fetch(h).then(function(r){return r.blob()}).then(function(bl){"
+                              + "var fr=new FileReader();fr.onload=function(){AndroidBridge.savePdf(fr.result.split(',')[1],a.getAttribute('download')||'ILMORA.pdf')};"
+                              + "fr.readAsDataURL(bl)})}},true)})()");
+                      }
+
+                      @Override
+                      public boolean shouldOverrideUrlLoading(View v, WebResourceRequest req) {
+                          Uri u = req.getUrl();
+                          String host = u.getHost() == null ? "" : u.getHost();
+                          if (host.contains("ilmoraapp4760.github.io")) return false;
+                          if (u.getScheme() != null && (u.getScheme().startsWith("http"))) {
+                              try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception e) {}
+                              return true;
+                          }
+                          try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception e) {}
+                          return true;
+                      }
+                  });
+                  wv.setDownloadListener((url, agent, name, mime, len) -> {
+                      try {
+                          if (url.startsWith("blob:")) return;
+                          DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                          if (dm == null) return;
+                          DownloadManager.Request rq = new DownloadManager.Request(Uri.parse(url));
+                          rq.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                          rq.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,
+                              URLUtil.guessFileName(url, name, mime));
+                          dm.enqueue(rq);
+                          toast("Downloading...");
+                      } catch (Exception e) {}
+                  });
+                  wv.addJavascriptInterface(new Bridge(), "AndroidBridge");
+                  setContentView(wv);
+                  wv.loadUrl(LIVE);
+              }
+
+              class Bridge {
+                  @JavascriptInterface
+                  public void setTimings(String json) { AdhanService.timingsJson = json; }
+
+                  @JavascriptInterface
+                  public void savePdf(String b64, String name) {
+                      try {
+                          byte[] data = Base64.decode(b64, Base64.DEFAULT);
+                          String fn = (name == null || name.isEmpty()) ? "ILMORA.pdf" : name;
+                          if (Build.VERSION.SDK_INT >= 29) {
+                              ContentValues cv = new ContentValues();
+                              cv.put("_display_name", fn);
+                              cv.put("mime_type", "application/pdf");
+                              cv.put("relative_path", Environment.DIRECTORY_DOWNLOADS);
+                              Uri uri = getContentResolver().insert(
+                                  MediaStoreDownloadsUri(), cv);
+                              if (uri != null) {
+                                  OutputStream os = getContentResolver().openOutputStream(uri);
+                                  os.write(data); os.close();
+                              }
+                          } else {
+                              File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                              if (dir != null) {
+                                  File f = new File(dir, fn);
+                                  FileOutputStream fo = new FileOutputStream(f);
+                                  fo.write(data); fo.close();
+                              }
+                          }
+                          toast("\u2713 " + fn + " saved to Downloads");
+                      } catch (Exception e) { toast("Download failed"); }
+                  }
+              }
+
+              private Uri MediaStoreDownloadsUri() {
+                  return Uri.parse("content://media/external/downloads");
+              }
+
+              private void toast(String m) {
+                  runOnUiThread(() -> Toast.makeText(MainActivity.this, m, Toast.LENGTH_LONG).show());
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (wv != null && wv.canGoBack()) wv.goBack();
+                  else {
+                      long now = System.currentTimeMillis();
+                      if (now - lastBack < 2000) super.onBackPressed();
+                      else { lastBack = now; toast("Press back again to exit"); }
+                  }
+              }
+          }
+          EOF
+
+      - name: Decode signing keystore
+        env:
+          ILMORA_KEY_B64: ${{ secrets.ILMORA_KEY_B64 }}
+        run: |
+          if [ -n "$ILMORA_KEY_B64" ]; then
+            echo "$ILMORA_KEY_B64" | base64 -d > app/ilmora.keystore
+          else
+            printf '%s' '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' | base64 -d > app/ilmora.keystore
+          fi
+
+      - name: Build APK (release-signed, auto-retry)
+        run: |
+          ok=0
+          for i in 1 2 3; do
+            echo "=== BUILD ATTEMPT $i ==="
+            if gradle assembleRelease --no-daemon; then ok=1; break; fi
+            echo "attempt $i failed - waiting 20s before retry..."
+            sleep 20
+          done
+          if [ "$ok" != "1" ]; then echo "ALL 3 ATTEMPTS FAILED"; exit 1; fi
+
+      - name: Publish APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk ILMORA.apk
+          gh release delete latest --yes --cleanup 2>/dev/null || true
+          gh release create latest ILMORA.apk --title "ILMORA Native APK" --notes "ILMORA Android app — full app with Digital Store, Donations, Login, Quran, Qibla, Azkar + native background Adhan (works when app is closed and after phone restart). PDF downloads are saved directly to your Downloads folder."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ILMORA-APK
+          path: app/build/outputs/apk/release/app-release.apk
